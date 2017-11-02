@@ -1,0 +1,23 @@
+image: alpine
+
+stages:
+  - build
+  - test
+
+cache:
+  paths:
+    - target/
+
+maven-build:
+  stage: build
+  only:
+  - master
+  script:
+    - mvn install -B
+
+bb-test:
+  stage: test
+  only:
+  - master
+  script:
+    - proj_dir=`pwd`; (cd ~/code; ./checker.py -p ${proj_dir})
