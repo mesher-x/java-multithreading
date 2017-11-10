@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package ru.mipt.java2017.hw2;
+
+option java_multiple_files = true;
+option java_package = "ru.mipt.java2017.hw2";
+option java_outer_classname = "PrimesSumCounterProto";
+
+service PrimesSumCounter {
+  rpc countPrimesSum (Request) returns (Response) {}
+}
+
+message Request {
+  message Range {
+    int64 leftBorder = 1;
+    int64 rightBorder = 2;
+  }
+  int32 serverNum = 1;
+  int32 requestNum = 2;
+  repeated Range ranges = 3;
+}
+
+
+message Response {
+  int32 serverNum = 1;
+  int32 requestNum = 2;
+  int64 sum = 3;
+}
