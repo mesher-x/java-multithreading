@@ -10,7 +10,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.Semaphore;
-import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import java.io.IOException;
@@ -35,31 +34,16 @@ public class Server {
       .addService(new PrimesSumCounterImpl(coresAmount))
       .build()
       .start();
-    logger.info("Server started, listening on " + port);
-    Runtime.getRuntime().addShutdownHook(new Thread() {
-      @Override
-      public void run() {
-        // Use stderr here since the logger may have been reset by its JVM shutdown hook.
-        System.err.println("*** shutting down gRPC server since JVM is shutting down");
-        Server.this.stop();
-        System.err.println("*** server shut down");
+    logger.info("Server started, listening on {}", port);
+    Runtime.getRuntime().addShutdownHook(
+      new Thread() {
+        @Override
+        public void run() {
+          System.err.println("*** shutting down gRPC server since JVM is shutting down");
+          Server.this.stop();
+          System.err.println("*** server shut down");
       }
     });
-  }
-
-  private void stop() {
-    if (baseServer != null) {
-      baseServer.shutdown();
-    }
-  }
-
-  /**
-   * Await termination on the main thread since the grpc library uses daemon threads.
-   */
-  private void blockUntilShutdown() throws InterruptedException {
-    if (baseServer != null) {
-      baseServer.awaitTermination();
-    }
   }
 
   class PrimesSumCounterImpl extends PrimesSumCounterGrpc.PrimesSumCounterImplBase {
@@ -67,32 +51,6 @@ public class Server {
     ExecutorService executor;
     ArrayList< Future<Long> > futures;
     int coresAmount;
-
-    private String inLogger(ArrayList<Request.Range> ranges) {
-      StringBuilder s = new StringBuilder();
-      s.append('[');
-      for (Request.Range range : ranges) {
-        s.append(range.getLeftBorder());
-        s.append('-');
-        s.append(range.getRightBorder());
-        s.append(", ");
-      }
-      s.append(']');
-      return s.toString();
-    }
-
-    private String inLogger(List<Range> ranges) {
-      StringBuilder s = new StringBuilder();
-      s.append('[');
-      for (Request.Range range : ranges) {
-        s.append(range.getLeftBorder());
-        s.append('-');
-        s.append(range.getRightBorder());
-        s.append(", ");
-      }
-      s.append(']');
-      return s.toString();
-    }
 
     PrimesSumCounterImpl(int coresAmount) {
       this.coresAmount = coresAmount;
@@ -106,7 +64,7 @@ public class Server {
         request.getServerNum(),
         request.getRequestNum(),
         inLogger(request.getRangesList()));
-      ArrayList< ArrayList<Request.Range> > rangesLists = new ArrayList<>();
+      ArrayList< ArrayList<Request.Range> > rangesLists;
       rangesLists = redistributeRanges(request.getRangesList());
       for (int core = 0; core < coresAmount; ++core) {
         futures.add(core, executor.submit(new PrimesSumInSubRangeCounter(rangesLists.get(core))));
@@ -114,7 +72,7 @@ public class Server {
       try {
         semaphore.acquire(coresAmount);
       } catch (InterruptedException e) {
-        logger.error("semaphore acquire failure in the countPrimesSum, exception: {}", e.getMessage());
+        logger.error("semaphore acquire failure in the countPrimesSum, exception message: {}", e.getMessage());
         stop();
       }
       long sum = 0;
@@ -130,24 +88,24 @@ public class Server {
         request.getRequestNum(),
         request.getServerNum(),
         inLogger(request.getRangesList()));
-      responseObserver.onNext(
-        Response.newBuilder()
-                .setRequestNum(request.getRequestNum())
-                .setServerNum(request.getServerNum())
-                .setSum(sum)
-                .build());
+      responseObserver.onNext(Response.newBuilder()
+                                      .setRequestNum(request.getRequestNum())
+                                      .setServerNum(request.getServerNum())
+                                      .setSum(sum)
+                                      .build());
       responseObserver.onCompleted();
-      logger.info("finish interaction between client and server {} for request {} for range: {}, with summ = {}",
+      logger.info("finish interaction between client and server {} for request {} for range: {}, with sum = {}",
         request.getServerNum(),
         request.getRequestNum(),
         inLogger(request.getRangesList()),
         sum);
     }
 
+    /**
+     * распределяет промежутки между ядрами
+     */
     private ArrayList<ArrayList<Request.Range>> redistributeRanges(List<Request.Range> rangesToRedistribute) {
-      assert rangesToRedistribute.size() > 0;
       ArrayList<ArrayList<Request.Range>> redistributedRangesLists = new ArrayList<ArrayList<Request.Range>>();
-      resize(redistributedRangesLists, coresAmount);
       long totalLength = 0;
       for (Request.Range range : rangesToRedistribute) {
         totalLength += range.getRightBorder() - range.getLeftBorder() + 1;
@@ -158,12 +116,13 @@ public class Server {
       Request.Range range = rangesToRedistribute.get(0);
       for (int coreNum = 0; coreNum < coresAmount; ++coreNum) {
         long alreadyAddedLen = 0;
+        redistributedRangesLists.add(new ArrayList<Request.Range>());
         while (alreadyAddedLen < segmentLength + ((rest != 0) ? 1 : 0)) {
           long rightBorder = min(range.getRightBorder(), range.getLeftBorder() + segmentLength - alreadyAddedLen - ((rest == 0) ? 1 : 0));
           alreadyAddedLen += rightBorder - range.getLeftBorder() + 1;
           if (rightBorder == range.getRightBorder()) {
             redistributedRangesLists.get(coreNum).add(range);
-            if (rangeNum < rangesToRedistribute.size() - 1) {
+            if (rangeNum != rangesToRedistribute.size() - 1) {
               range = rangesToRedistribute.get(++rangeNum);
             }
           } else {
@@ -185,18 +144,13 @@ public class Server {
       return redistributedRangesLists;
     }
 
-    public void resize(ArrayList<ArrayList<Request.Range>> arrayList, int size) {
-      while (arrayList.size() < size) {
-        arrayList.add(new ArrayList<Request.Range>());
-      }
-    }
-
     private class PrimesSumInSubRangeCounter implements Callable<Long> {
       private ArrayList<Request.Range> ranges;
 
       PrimesSumInSubRangeCounter(ArrayList<Request.Range> ranges) {
         this.ranges = ranges;
       }
+
       @Override
       public Long call() throws Exception {
         long sum = 0;
@@ -220,5 +174,30 @@ public class Server {
         return true;
       }
     }
+  }
+
+  private void stop() {
+    if (baseServer != null) {
+      baseServer.shutdown();
+    }
+  }
+
+  private void blockUntilShutdown() throws InterruptedException {
+    if (baseServer != null) {
+      baseServer.awaitTermination();
+    }
+  }
+
+  private String inLogger(List<Range> ranges) {
+    StringBuilder s = new StringBuilder();
+    s.append('[');
+    for (Request.Range range : ranges) {
+      s.append(range.getLeftBorder());
+      s.append('-');
+      s.append(range.getRightBorder());
+      s.append(", ");
+    }
+    s.append(']');
+    return s.toString();
   }
 }

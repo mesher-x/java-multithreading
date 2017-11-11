@@ -14,100 +14,54 @@ import ru.mipt.java2017.hw2.Request.Range;
 
 import static java.lang.Math.max;
 import static java.lang.Math.min;
-import static java.lang.Math.sqrt;
 import static java.lang.System.exit;
-import static java.lang.System.setSecurityManager;
 
 public class Client {
   private static final Logger logger = LoggerFactory.getLogger("Client");
   private Semaphore counted = new Semaphore(0);
+  /**
+   * main thread блокируется на семафоре до получения ответа по всем запросам
+   */
   private int requestsWithoutResponseAmount = 0;
   private ArrayList<Integer> unavalaibleServers = new ArrayList<>();
-  // один отвалившийся сервер = один дополнительный запрос к оставшимся
-  // sum[unavalaibleServers.size()] = результат последнего запроса
+  /**
+   * один отвалившийся сервер = один дополнительный запрос к оставшимся
+   * sum.get(unavalaibleServers.size()) = результат последнего запроса
+   */
   private PrimesSumCounterGrpc.PrimesSumCounterStub asyncStub;
   private ArrayList<Server> servers;
-
-  private synchronized void addRequest() {
-    ++requestsWithoutResponseAmount;
-    logger.info(Integer.toString(requestsWithoutResponseAmount));
-  }
-
-  private synchronized void deleteRequest() {
-    --requestsWithoutResponseAmount;
-    logger.info(Integer.toString(requestsWithoutResponseAmount));
-    if (requestsWithoutResponseAmount == 0) {
-      counted.release(1);
-    }
-  }
 
   private class Server {
     ManagedChannel channel;
     ArrayList< ArrayList<Request.Range> > rangesLists = new ArrayList<>();
-    ArrayList<Long> sums = new ArrayList<>();// sums.get(i) - результат iого запроса (сумма или -1)
-    MyStreamObServer responseObServer = new MyStreamObServer();
-  }
-
-  private class MyStreamObServer implements StreamObserver<Response> {
-    private boolean errorHappened = false;
-
-    public boolean hasErrorHappened() {
-      return errorHappened;
-    }
-
-    @Override
-    public void onNext(Response response) {
-      logger.info("got reponse {} from server {}, sum = {}",
-        response.getRequestNum(),
-        response.getServerNum(),
-        response.getSum());
-      Server s = servers.get(response.getServerNum());
-      s.sums.set(response.getRequestNum(), response.getSum());
-      deleteRequest();
-    }
-
-    @Override
-    public void onError(Throwable t) {
-      //Status status = Status.fromThrowable(t);
-      logger.error("request failed, exception: {}", t.getMessage());
-      errorHappened = true;
-      redistribute();
-      //finishLatch.countDown();
-    }
-    @Override
-    public void onCompleted() {
-      logger.info("interaction is finished");
-      //finishLatch.countDown();
-    }
-  }
-
-  private synchronized void addServerToUnavailableOnes(int serverNum) {
-    if (servers.size() == unavalaibleServers.size() + 1) {
-      logger.info("all servers are down");
-      exit(0);
-    } else {
-      unavalaibleServers.add(serverNum);
-    }
+    /**
+     * rangesLists.get(i) - список промежутков iого запроса
+     */
+    ArrayList<Long> sums = new ArrayList<>();
+    /**
+     * sums.get(i) - результат iого запроса (сумма или -1)
+     */
+     MyStreamObServer responseObServer = new MyStreamObServer();
   }
 
   public static void main(String[] args) throws Exception {
-    logger.info("lets go");
+    logger.info("start");
     if (args.length % 2 != 0 || args.length <= 2) {
-      logger.info("wrong amount({}) of command line arguments: ", args.length);
-      exit(1);
+      logger.info("wrong amount of command line arguments");
+      exit(0);
     }
     Client client = new Client();
     try {
-      client.countSumOfPrimes(args);
+      client.initialRequests(args);
+      client.countSumOfResponses();
     } catch (Exception e) {
-      System.out.println("uncatched");
-      logger.error("exception: {}", e.getMessage());
+      logger.error("uncatched exception: {}", e.getClass());
     } finally {
       client.shutdown();
     }
   }
 
-  private void countSumOfPrimes(String[] args) {
+  private void initialRequests(String[] args) {
     long leftBorder = Long.parseLong(args[0]);
     long rightBorder = Long.parseLong(args[1]);
     int serversAmount = (args.length - 2) / 2;
@@ -118,8 +72,8 @@ public class Client {
     for (int ServerNum = 0; ServerNum < serversAmount; ++ServerNum) {
       Server s = new Server();
       s.channel = ManagedChannelBuilder.forAddress(args[argNum], Integer.parseInt(args[argNum + 1]))
-        .usePlaintext(true)
-        .build();
+                                       .usePlaintext(true)
+                                       .build();
       Request.Range.Builder rangeBuilder = Request.Range.newBuilder();
       rangeBuilder.setLeftBorder(leftBorder);
       if (rest > 0) {
@@ -140,101 +94,25 @@ public class Client {
     for (Server s : servers) {
       countPrimesSumInSubRange(s);
     }
-    try {
-      counted.acquire(1);
-      long result = 0;
-      for (Server s : servers) {
-        for (Long sum : s.sums) {
-          if (sum == -1) {
-            break;
-          }
-          long actualSum = PrimesSum(s.rangesLists.get(s.sums.indexOf(sum)));
-          if (actualSum != sum) {
-            logger.info("sum for range {} = {}, got {}",
-              inLogger(s.rangesLists.get(s.sums.indexOf(sum))),
-              actualSum,
-              sum);
-          }
-          result += sum;
-        }
-      }
-      System.out.println(result);
-    } catch (InterruptedException e) {
-      logger.error("semaphore acquire fail in the end of countSumOfPrimes, exception: {}", e.getMessage());
-    }
   }
 
-  public Long PrimesSum(ArrayList<Request.Range> ranges) {
-    long sum = 0;
-    for (Request.Range range : ranges) {
-      for (long number = range.getLeftBorder(); number <= range.getRightBorder(); ++number) {
-        if (isPrime(number)) {
-          sum += number;
-        }
-      }
-    }
-    return sum;
-  }
-
-  private boolean isPrime(long number) {
-    for (long divider = 2; divider <= sqrt(number); ++divider) {
-      if (number % divider == 0) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  private String inLogger(ArrayList<Request.Range> ranges) {
-    StringBuilder s = new StringBuilder();
-    s.append('[');
-    for (Request.Range range : ranges) {
-      s.append(range.getLeftBorder());
-      s.append('-');
-      s.append(range.getRightBorder());
-      s.append(", ");
-    }
-    s.append(']');
-    return s.toString();
-  }
-
-  private String inLogger(List<Range> ranges) {
-    StringBuilder s = new StringBuilder();
-    s.append('[');
-    for (Request.Range range : ranges) {
-      s.append(range.getLeftBorder());
-      s.append('-');
-      s.append(range.getRightBorder());
-      s.append(", ");
-    }
-    s.append(']');
-    return s.toString();
-  }
-
-  public void countPrimesSumInSubRange(Server s) {
-    logger.info("primessum {} ", Integer.toString(servers.indexOf(s)));
-    logger.info(
-      "performing request {} to server  {}, ranges: {}",
+  private void countPrimesSumInSubRange(Server s) {
+    logger.info("performing request {} to server {}, ranges: {}",
       unavalaibleServers.size(),
       servers.indexOf(s),
       inLogger(s.rangesLists.get(unavalaibleServers.size())));
-    Request.Builder requestBuilder = Request.newBuilder();
-    requestBuilder.setRequestNum(unavalaibleServers.size()).setServerNum(servers.indexOf(s));
-    for (Request.Range range : s.rangesLists.get(unavalaibleServers.size())) {
-      Request.Range proto_range = Request.Range.newBuilder()
-                                               .setLeftBorder(range.getLeftBorder())
-                                               .setRightBorder(range.getRightBorder())
-                                               .build();
-      requestBuilder.addRanges(proto_range);
-    }
-    Request request = requestBuilder.build();
+    Request request = Request.newBuilder()
+                             .setRequestNum(unavalaibleServers.size())
+                             .setServerNum(servers.indexOf(s))
+                             .addAllRanges(s.rangesLists.get(unavalaibleServers.size()))
+                             .build();
     asyncStub = PrimesSumCounterGrpc.newStub(s.channel);
     s.sums.add(Long.valueOf(-1));
     try {
       asyncStub.countPrimesSum(request, s.responseObServer);
       addRequest();
     } catch (StatusRuntimeException e) {
-      logger.error("request {} to server {} failed for range: {} , exception: {}",
+      logger.error("request {} to server {} failed for range: {} , exception status: {}",
         request.getRequestNum(),
         request.getServerNum(),
         inLogger(request.getRangesList()),
@@ -242,18 +120,46 @@ public class Client {
     }
   }
 
+  private class MyStreamObServer implements StreamObserver<Response> {
+    private boolean errorHappened = false;
+
+    @Override
+    public void onNext(Response response) {
+      logger.info("got reponse {} from server {}, sum = {}",
+        response.getRequestNum(),
+        response.getServerNum(),
+        response.getSum());
+      Server s = servers.get(response.getServerNum());
+      s.sums.set(response.getRequestNum(), response.getSum());
+      deleteRequest();
+    }
+
+    @Override
+    public void onError(Throwable t) {
+      logger.error("request failed, exception: {}", t.getMessage());
+      errorHappened = true;
+      redistribute();
+    }
+    @Override
+    public void onCompleted() {
+      logger.info("interaction is finished");
+    }
+  }
+
+  /**
+   * находит отвалившийся сервер и перераспределяет необработанные им запросы между остальными
+   */
   private synchronized void redistribute() {
-    // находим отвалившийся сервер и перераспределяем необработанные им отрезки между остальными
     ArrayList<Request.Range> rangesToRedistribute = new ArrayList<>();
     for (int serverNum = 0; serverNum < servers.size(); ++serverNum) {
       Server s = servers.get(serverNum);
-      if (!unavalaibleServers.contains(serverNum) && s.responseObServer.hasErrorHappened()) {
+      if (!unavalaibleServers.contains(serverNum) && s.responseObServer.errorHappened) {
         for (int requestNum = 0; requestNum < s.sums.size(); ++requestNum) {
           if (s.sums.get(requestNum) == -1) {
             rangesToRedistribute.addAll(s.rangesLists.get(requestNum));
           }
         }
-        logger.info("+ 1 unavailable server");
+        logger.info("server {} is unavailable", serverNum);
         addServerToUnavailableOnes(serverNum);
         break;
       }
@@ -265,20 +171,16 @@ public class Client {
           countPrimesSumInSubRange(servers.get(serverNum));
         }
       }
-      deleteRequest();//отвалившийся
-    }
+      deleteRequest(); // отвалившийся
+    } // rangesToRedistribute.size() == 0, если сервер уже был помечен как недоступный
   }
-  // -3
-  // -3 + 1 - 2 = -4
-  // -4 + 1 = -4
-  // -4 -1 + 1 = -4
 
   private void redistributeRanges(ArrayList<Request.Range> rangesToRedistribute) {
     long totalLength = 0;
     for (Request.Range range : rangesToRedistribute) {
       totalLength += range.getRightBorder() - range.getLeftBorder() + 1;
     }
-    long serversAmount = servers.size() - unavalaibleServers.size();
+    int serversAmount = servers.size() - unavalaibleServers.size();
     long segmentLength = max(1, totalLength / serversAmount);
     int rest = (int)(totalLength % serversAmount);
     int rangeNum = 0;
@@ -294,7 +196,7 @@ public class Client {
         alreadyAddedLen += rightBorder - range.getLeftBorder() + 1;
         if (rightBorder == range.getRightBorder()) {
           s.rangesLists.get(unavalaibleServers.size()).add(range);
-           if (rangeNum < rangesToRedistribute.size() - 1) {
+          if (rangeNum != rangesToRedistribute.size() - 1) {
             range = rangesToRedistribute.get(++rangeNum);
           }
         } else {
@@ -315,9 +217,66 @@ public class Client {
     }
   }
 
-  public void shutdown() throws InterruptedException {
+  private void countSumOfResponses() {
+    try {
+      counted.acquire(1);
+      long result = 0;
+      for (Server s : servers) {
+        for (Long sum : s.sums) {
+          if (sum == -1) {
+            break;
+            // следующие после первого неудачного запросы, если и были сделаны, то к недоступному серверу,
+            // а, значит, эти запросы были перенаправлены к другим серверам
+          }
+          result += sum;
+        }
+      }
+      System.out.println(result);
+    } catch (InterruptedException e) {
+      logger.error("semaphore acquire fail in countSumOfResponses, exception message: {}", e.getMessage());
+    }
+  }
+
+  private synchronized void addRequest() {
+    ++requestsWithoutResponseAmount;
+    logger.info("sent request, amount of requests without response = {}",
+      Integer.toString(requestsWithoutResponseAmount));
+  }
+
+  private synchronized void deleteRequest() {
+    --requestsWithoutResponseAmount;
+    logger.info("got response, amount of requests without response = {}",
+      Integer.toString(requestsWithoutResponseAmount));
+    if (requestsWithoutResponseAmount == 0) {
+      counted.release(1);
+    }
+  }
+
+  private void addServerToUnavailableOnes(int serverNum) {
+    if (servers.size() == unavalaibleServers.size() + 1) {
+      logger.info("all servers are down");
+      exit(0);
+    } else {
+      unavalaibleServers.add(serverNum);
+    }
+  }
+
+  private void shutdown() throws InterruptedException {
     for (Server s : servers) {
       s.channel.shutdown().awaitTermination(5, TimeUnit.SECONDS);
     }
+  }
+
+  private String inLogger(List<Range> ranges) {
+    StringBuilder s = new StringBuilder();
+    s.append('[');
+    for (Request.Range range : ranges) {
+      s.append(range.getLeftBorder());
+      s.append('-');
+      s.append(range.getRightBorder());
+      s.append(", ");
+    }
+    s.append(']');
+    return s.toString();
   }
 }
